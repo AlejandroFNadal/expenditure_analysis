@@ -17,60 +17,84 @@ class CSVParser:
 
         Handles grouped transactions where a parent transaction is followed by
         sub-transactions with empty dates that show the breakdown.
+        Only imports the detailed sub-transactions, skipping the parent summary.
         """
         transactions = []
         last_date = None
 
         with open(csv_path, 'r', encoding='utf-8-sig') as f:
             # ZKB uses semicolon delimiter
-            reader = csv.DictReader(f, delimiter=';')
+            # Read all rows into a list to allow look-ahead
+            rows = list(csv.DictReader(f, delimiter=';'))
 
-            for row in reader:
-                # Extract relevant fields
-                date = row.get('Date', '').strip()
-                description = row.get('Booking text', '').strip()
-                debit = row.get('Debit CHF', '').strip()
-                credit = row.get('Credit CHF', '').strip()
-                reference = row.get('ZKB reference', '').strip()
+        # Process rows with look-ahead capability
+        i = 0
+        while i < len(rows):
+            row = rows[i]
 
-                # Check for grouped transaction (empty date, amount in "Amount details" field)
-                amount_details = row.get('Amount details', '').strip()
+            # Extract relevant fields
+            date = row.get('Date', '').strip()
+            description = row.get('Booking text', '').strip()
+            debit = row.get('Debit CHF', '').strip()
+            credit = row.get('Credit CHF', '').strip()
+            reference = row.get('ZKB reference', '').strip()
+            amount_details = row.get('Amount details', '').strip()
 
-                if not date and amount_details:
-                    # This is a grouped sub-transaction
-                    # Use last_date and amount from "Amount details" field
-                    if last_date:
-                        date = last_date
-                        amount = float(amount_details)
-                        is_credit = False  # Grouped transactions are typically expenses
+            # Handle sub-transactions (no date, but has amount_details)
+            if not date and amount_details:
+                # This is a grouped sub-transaction
+                # Use last_date and amount from "Amount details" field
+                if last_date:
+                    date = last_date
+                    amount = float(amount_details)
+                    is_credit = False  # Grouped transactions are typically expenses
 
-                        transactions.append({
-                            'date': date,
-                            'description': description,
-                            'amount': amount,
-                            'is_credit': is_credit,
-                            'reference': reference
-                        })
-                    continue
+                    transactions.append({
+                        'date': date,
+                        'description': description,
+                        'amount': amount,
+                        'is_credit': is_credit,
+                        'reference': reference
+                    })
+                i += 1
+                continue
 
-                # Skip rows without date or amount
-                if not date or (not debit and not credit):
-                    continue
+            # Skip rows without date or amount
+            if not date or (not debit and not credit):
+                i += 1
+                continue
 
-                # Update last_date for potential grouped transactions
-                last_date = date
+            # Check if this is a parent transaction (next row is a sub-transaction)
+            is_parent = False
+            if i + 1 < len(rows):
+                next_row = rows[i + 1]
+                next_date = next_row.get('Date', '').strip()
+                next_amount_details = next_row.get('Amount details', '').strip()
+                # If next row has no date but has amount_details, current row is a parent
+                if not next_date and next_amount_details:
+                    is_parent = True
 
-                # Determine if it's a credit (income) or debit (expense)
-                is_credit = bool(credit and not debit)
-                amount = float(credit) if is_credit else float(debit)
+            # Update last_date for potential grouped transactions
+            last_date = date
 
-                transactions.append({
-                    'date': date,
-                    'description': description,
-                    'amount': amount,
-                    'is_credit': is_credit,
-                    'reference': reference
-                })
+            # Skip parent transactions (we'll import the detailed sub-transactions instead)
+            if is_parent:
+                i += 1
+                continue
+
+            # Regular transaction - not a parent
+            is_credit = bool(credit and not debit)
+            amount = float(credit) if is_credit else float(debit)
+
+            transactions.append({
+                'date': date,
+                'description': description,
+                'amount': amount,
+                'is_credit': is_credit,
+                'reference': reference
+            })
+
+            i += 1
 
         # Reverse to get chronological order (oldest first)
         # CSV is in reverse order (newest first)
@@ -104,7 +128,7 @@ class CSVParser:
                 continue
 
             # Try to auto-categorize
-            category = self.db.find_category_by_description(trans['description'], trans['amount'])
+            category = self.db.find_category_by_description(trans['description'], trans['amount'], trans['is_credit'])
 
             # Try to auto-detect transfer
             target_account = self.db.find_transfer_by_description(trans['description'], main_account)

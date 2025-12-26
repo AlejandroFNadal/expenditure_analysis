@@ -78,6 +78,7 @@ class CategoryIndicator(Base):
     id = Column(Integer, primary_key=True)
     pattern = Column(String, nullable=False)
     amount = Column(Float, nullable=True)  # Optional: match specific amount
+    is_credit = Column(Boolean, nullable=True)  # None=both, True=credit only, False=debit only
     category_id = Column(Integer, ForeignKey('expense_categories.id'), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -85,7 +86,10 @@ class CategoryIndicator(Base):
 
     def __repr__(self):
         amount_str = f", amount={self.amount}" if self.amount else ""
-        return f"<CategoryIndicator(pattern='{self.pattern}'{amount_str})>"
+        credit_str = ""
+        if self.is_credit is not None:
+            credit_str = f", credit_only" if self.is_credit else f", debit_only"
+        return f"<CategoryIndicator(pattern='{self.pattern}'{amount_str}{credit_str})>"
 
 
 class TransferIndicator(Base):
@@ -150,6 +154,27 @@ class Database:
     def get_account_by_name(self, name: str) -> Optional[Account]:
         """Get account by name"""
         return self.session.query(Account).filter_by(name=name).first()
+
+    def get_last_transaction_for_account(self, account: Account) -> Optional[Expense]:
+        """
+        Get the most recent transaction for an account
+        Considers both expenses from the account and transfers to the account
+        """
+        last_expense = self.session.query(Expense).filter(
+            (Expense.account_id == account.id) | (Expense.target_account_id == account.id)
+        ).order_by(Expense.date.desc()).first()
+        return last_expense
+
+    def get_last_categorized_for_account(self, account: Account) -> Optional[Expense]:
+        """
+        Get the most recent categorized transaction for an account
+        Considers both categorized expenses and transfers
+        """
+        last_categorized = self.session.query(Expense).filter(
+            Expense.account_id == account.id,
+            (Expense.category_id.isnot(None)) | (Expense.is_transfer == True)
+        ).order_by(Expense.date.desc()).first()
+        return last_categorized
 
     def set_main_account(self, account: Account):
         """Set an account as the main account"""
@@ -222,19 +247,31 @@ class Database:
         self.session.commit()
         return expense
 
-    def add_category_indicator(self, pattern: str, category: ExpenseCategory, amount: Optional[float] = None):
-        """Add a text pattern (and optionally amount) that indicates a category"""
-        indicator = CategoryIndicator(pattern=pattern.upper(), category=category, amount=amount)
+    def add_category_indicator(self, pattern: str, category: ExpenseCategory, amount: Optional[float] = None, is_credit: Optional[bool] = None):
+        """Add a text pattern (and optionally amount and credit/debit type) that indicates a category
+
+        Args:
+            pattern: Text pattern to match in description
+            category: Category to assign
+            amount: Optional amount to match
+            is_credit: None=match both credits and debits, True=credits only, False=debits only
+        """
+        indicator = CategoryIndicator(pattern=pattern.upper(), category=category, amount=amount, is_credit=is_credit)
         self.session.add(indicator)
         try:
             self.session.commit()
         except:
             self.session.rollback()
 
-    def find_category_by_description(self, description: str, amount: Optional[float] = None) -> Optional[ExpenseCategory]:
+    def find_category_by_description(self, description: str, amount: Optional[float] = None, is_credit: Optional[bool] = None) -> Optional[ExpenseCategory]:
         """
-        Find a category based on text patterns and optionally amount
+        Find a category based on text patterns and optionally amount and credit/debit type
         Priority: Rules with amount > Rules without amount, then by longest pattern
+
+        Args:
+            description: Transaction description to match
+            amount: Optional amount to match
+            is_credit: Whether the transaction is a credit (True) or debit (False)
         """
         description_upper = description.upper()
 
@@ -252,6 +289,11 @@ class Database:
             # If indicator has amount requirement, check if it matches
             if ind.amount is not None:
                 if amount is None or abs(amount - ind.amount) > 0.01:  # Allow small rounding differences
+                    continue
+
+            # If indicator has credit/debit requirement, check if it matches
+            if ind.is_credit is not None:
+                if is_credit is None or ind.is_credit != is_credit:
                     continue
 
             # Found a match - return it (already in priority order)
@@ -298,9 +340,49 @@ class Database:
             Expense.is_transfer == False
         ).order_by(Expense.date.asc()).all()
 
+    def get_all_expenses(self, order_desc: bool = True) -> List[Expense]:
+        """Get all expenses ordered by date"""
+        query = self.session.query(Expense)
+        if order_desc:
+            return query.order_by(Expense.date.desc()).all()
+        return query.order_by(Expense.date.asc()).all()
+
+    def search_expenses(self, term: str) -> List[Expense]:
+        """Search expenses by description (case-insensitive)"""
+        return self.session.query(Expense).filter(
+            Expense.description.ilike(f'%{term}%')
+        ).order_by(Expense.date.desc()).all()
+
+    def get_recent_expenses(self, limit: int = 5) -> List[Expense]:
+        """Get the most recent expenses"""
+        return self.session.query(Expense).order_by(
+            Expense.date.desc()
+        ).limit(limit).all()
+
     def update_expense_category(self, expense: Expense, category: ExpenseCategory):
         """Update the category of an expense"""
         expense.category = category
+        self.session.commit()
+
+    def delete_expense(self, expense: Expense):
+        """
+        Delete an expense and revert account balance changes
+        """
+        # Revert balance changes
+        if expense.account:
+            if expense.is_transfer and expense.target_account:
+                # Revert transfer: add back to source, subtract from target
+                expense.account.balance += expense.amount
+                expense.target_account.balance -= expense.amount
+            elif expense.is_credit:
+                # Revert credit: decrease balance
+                expense.account.balance -= expense.amount
+            else:
+                # Revert debit: increase balance
+                expense.account.balance += expense.amount
+
+        # Delete the expense
+        self.session.delete(expense)
         self.session.commit()
 
     def get_monthly_report(self):

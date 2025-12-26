@@ -10,6 +10,7 @@ from csv_parser import CSVParser
 from categorizer import InteractiveCategorizer
 from reports import Reporter
 from settings import Settings
+from tui.app import ExpenseTrackerApp
 
 
 def import_csv(db: Database, csv_path: str):
@@ -116,13 +117,55 @@ def list_accounts(db: Database):
         return
 
     print("\n📋 Accounts:")
-    print("=" * 70)
+    print("=" * 80)
     for account in accounts:
         main_indicator = " [MAIN]" if account.is_main else ""
         desc = f" - {account.description}" if account.description else ""
         print(f"  {account.name}{main_indicator}")
         print(f"    Balance: {account.balance:>10.2f} CHF{desc}")
-    print("=" * 70)
+
+        # Get and display last transaction
+        last_txn = db.get_last_transaction_for_account(account)
+        if last_txn:
+            date_str = last_txn.date.strftime('%d.%m.%Y')
+            # Determine transaction type and description
+            if last_txn.is_transfer:
+                if last_txn.account_id == account.id:
+                    # Transfer out from this account
+                    txn_type = "Transfer to"
+                    other_account = last_txn.target_account.name if last_txn.target_account else "Unknown"
+                    txn_desc = other_account
+                else:
+                    # Transfer into this account
+                    txn_type = "Transfer from"
+                    source_account = last_txn.account.name if last_txn.account else "Unknown"
+                    txn_desc = source_account
+            else:
+                txn_type = "Credit" if last_txn.is_credit else "Debit"
+                txn_desc = last_txn.description[:40] + "..." if len(last_txn.description) > 40 else last_txn.description
+
+            print(f"    Last txn: {date_str} | {txn_type} | {last_txn.amount:.2f} CHF | {txn_desc}")
+        else:
+            print(f"    Last txn: No transactions")
+
+        # Get and display last categorized transaction
+        last_cat = db.get_last_categorized_for_account(account)
+        if last_cat:
+            date_str = last_cat.date.strftime('%d.%m.%Y')
+            if last_cat.is_transfer:
+                txn_type = "Transfer"
+                if last_cat.target_account:
+                    txn_desc = f"→ {last_cat.target_account.name}"
+                else:
+                    txn_desc = "Transfer"
+            else:
+                txn_type = last_cat.category.name if last_cat.category else "Unknown"
+                txn_desc = last_cat.description[:30] + "..." if len(last_cat.description) > 30 else last_cat.description
+            print(f"    Last cat:  {date_str} | {txn_type} | {last_cat.amount:.2f} CHF | {txn_desc}")
+        else:
+            print(f"    Last cat:  None categorized yet")
+        print()
+    print("=" * 80)
 
 
 def delete_account(db: Database):
@@ -215,6 +258,117 @@ def clear_transactions(db: Database):
         print(f"\n✅ Deleted {transaction_count} transactions and reset all account balances to 0.00 CHF")
     except Exception as e:
         print(f"\n❌ Error: {e}")
+
+
+def search_and_delete(db: Database):
+    """Search for transactions and delete selected ones"""
+    from database import Expense
+
+    print("\n🔍 Search for transactions to delete")
+    print("=" * 80)
+
+    # Get search criteria
+    print("\nSearch by (press Enter to skip):")
+    description_search = input("  Description contains: ").strip()
+    date_search = input("  Date (DD.MM.YYYY): ").strip()
+    amount_search = input("  Amount (exact): ").strip()
+
+    # Build query
+    query = db.session.query(Expense)
+
+    if description_search:
+        query = query.filter(Expense.description.ilike(f'%{description_search}%'))
+
+    if date_search:
+        from datetime import datetime
+        try:
+            date_obj = datetime.strptime(date_search, '%d.%m.%Y').date()
+            query = query.filter(Expense.date == date_obj)
+        except ValueError:
+            print("❌ Invalid date format. Use DD.MM.YYYY")
+            return
+
+    if amount_search:
+        try:
+            amount_float = float(amount_search)
+            query = query.filter(Expense.amount == amount_float)
+        except ValueError:
+            print("❌ Invalid amount format")
+            return
+
+    # Get results
+    results = query.order_by(Expense.date.desc()).all()
+
+    if not results:
+        print("\n❌ No transactions found matching your criteria.")
+        return
+
+    print(f"\n📋 Found {len(results)} transaction(s):")
+    print("=" * 80)
+
+    for i, expense in enumerate(results, 1):
+        date_str = expense.date.strftime('%d.%m.%Y')
+        txn_type = "Credit" if expense.is_credit else "Debit"
+        category_name = expense.category.name if expense.category else "Uncategorized"
+        if expense.is_transfer:
+            if expense.target_account:
+                category_name = f"Transfer → {expense.target_account.name}"
+            else:
+                category_name = "Transfer"
+
+        print(f"\n  {i}. {date_str} | {txn_type} | {expense.amount:.2f} CHF | {category_name}")
+        print(f"     {expense.description}")
+
+    print("\n" + "=" * 80)
+
+    # Select transactions to delete
+    print("\nEnter transaction numbers to delete (comma-separated, e.g., '1,3,5')")
+    print("Or type 'all' to delete all found transactions")
+    selection = input("Your choice (or Enter to cancel): ").strip().lower()
+
+    if not selection:
+        print("👋 Cancelled.")
+        return
+
+    # Determine which transactions to delete
+    to_delete = []
+    if selection == 'all':
+        to_delete = results
+    else:
+        try:
+            indices = [int(x.strip()) for x in selection.split(',')]
+            for idx in indices:
+                if 1 <= idx <= len(results):
+                    to_delete.append(results[idx - 1])
+                else:
+                    print(f"⚠️  Skipping invalid index: {idx}")
+        except ValueError:
+            print("❌ Invalid input format")
+            return
+
+    if not to_delete:
+        print("❌ No valid transactions selected")
+        return
+
+    # Confirm deletion
+    print(f"\n⚠️  You are about to delete {len(to_delete)} transaction(s).")
+    print("   This will revert the balance changes.")
+    confirm = input("Type 'yes' to confirm: ").strip().lower()
+
+    if confirm != 'yes':
+        print("👋 Cancelled.")
+        return
+
+    # Delete transactions
+    deleted_count = 0
+    for expense in to_delete:
+        try:
+            db.delete_expense(expense)
+            deleted_count += 1
+        except Exception as e:
+            print(f"❌ Error deleting transaction: {e}")
+
+    print(f"\n✅ Deleted {deleted_count} transaction(s) and reverted balances")
 
 
 def set_balance(db: Database):
@@ -325,7 +479,8 @@ Examples:
     parser.add_argument(
         'command',
         choices=['import', 'setup', 'categorize', 'report', 'summary', 'list-categories',
-                 'add-account', 'list-accounts', 'delete-account', 'set-balance', 'clear-transactions'],
+                 'add-account', 'list-accounts', 'delete-account', 'set-balance', 'clear-transactions',
+                 'search-delete', 'tui'],
         help='Command to execute'
     )
 
@@ -391,6 +546,13 @@ Examples:
 
         elif args.command == 'clear-transactions':
             clear_transactions(db)
+
+        elif args.command == 'search-delete':
+            search_and_delete(db)
+
+        elif args.command == 'tui':
+            app = ExpenseTrackerApp(db, settings)
+            app.run()
 
     except KeyboardInterrupt:
         print("\n\n👋 Goodbye!")
