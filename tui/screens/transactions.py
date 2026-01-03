@@ -113,6 +113,64 @@ class ConfirmModal(ModalScreen[bool]):
             self.dismiss(True)
 
 
+class EditTransactionModal(ModalScreen[dict]):
+    """Modal for editing a transaction"""
+
+    def __init__(self, expense: Expense, **kwargs):
+        super().__init__(**kwargs)
+        self.expense = expense
+
+    def compose(self) -> ComposeResult:
+        """Create child widgets"""
+        yield Container(
+            Static("[bold]Edit Transaction[/bold]", id="modal-title"),
+            Static(f"Date: {self.expense.date}", id="edit-date-info"),
+            Vertical(
+                Label("Amount:"),
+                Input(value=f"{self.expense.amount:.2f}", id="amount-input"),
+                Label("Description:"),
+                Input(value=self.expense.description, id="description-input"),
+                id="edit-inputs"
+            ),
+            Horizontal(
+                Button("Cancel", variant="default", id="cancel"),
+                Button("Save", variant="primary", id="save"),
+                id="modal-buttons"
+            ),
+            id="edit-modal"
+        )
+
+    def on_mount(self) -> None:
+        """Focus amount input when modal opens"""
+        self.query_one("#amount-input", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button presses"""
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "save":
+            amount_input = self.query_one("#amount-input", Input)
+            desc_input = self.query_one("#description-input", Input)
+
+            result = {}
+
+            # Check if amount changed
+            try:
+                new_amount = float(amount_input.value.strip())
+                if new_amount != self.expense.amount:
+                    result['amount'] = new_amount
+            except ValueError:
+                # Invalid amount, keep original
+                pass
+
+            # Check if description changed
+            new_desc = desc_input.value.strip()
+            if new_desc and new_desc != self.expense.description:
+                result['description'] = new_desc
+
+            self.dismiss(result if result else None)
+
+
 class TransactionsScreen(Screen):
     """Transactions list screen with vim navigation"""
 
@@ -122,6 +180,7 @@ class TransactionsScreen(Screen):
         Binding("g", "nav_top", "Top", show=False),
         Binding("G", "nav_bottom", "Bottom", show=False),
         Binding("c", "categorize", "Categorize", show=True),
+        Binding("e", "edit", "Edit", show=True),
         Binding("d", "delete", "Delete", show=True),
         Binding("u", "filter_uncategorized", "Uncategorized", show=True),
         Binding("a", "show_all", "Show All", show=True),
@@ -178,7 +237,7 @@ class TransactionsScreen(Screen):
         table = self.query_one("#transaction-list", TransactionList)
         table.jump_to_bottom()
 
-    async def action_categorize(self) -> None:
+    def action_categorize(self) -> None:
         """Categorize selected transaction"""
         table = self.query_one("#transaction-list", TransactionList)
         expense = table.get_selected_transaction()
@@ -194,15 +253,48 @@ class TransactionsScreen(Screen):
         if expense.category:
             self.notify(f"Already categorized as: {expense.category.name}", severity="information")
 
-        # Show category selection modal
-        category = await self.app.push_screen_wait(CategorySelectModal(self.db))
+        # Show category selection modal with callback
+        def handle_category(category: ExpenseCategory | None) -> None:
+            if category:
+                self.db.update_expense_category(expense, category)
+                table.refresh_transactions()
+                self.notify(f"Categorized as: {category.name}", severity="information")
 
-        if category:
-            self.db.update_expense_category(expense, category)
-            table.refresh_transactions()
-            self.notify(f"Categorized as: {category.name}", severity="information")
+        self.app.push_screen(CategorySelectModal(self.db), callback=handle_category)
 
-    async def action_delete(self) -> None:
+    def action_edit(self) -> None:
+        """Edit selected transaction"""
+        table = self.query_one("#transaction-list", TransactionList)
+        expense = table.get_selected_transaction()
+
+        if not expense:
+            self.notify("No transaction selected", severity="warning")
+            return
+
+        # Show edit modal with callback
+        def handle_edit(changes: dict | None) -> None:
+            if changes:
+                new_amount = changes.get('amount')
+                new_description = changes.get('description')
+
+                self.db.update_expense(
+                    expense,
+                    new_amount=new_amount,
+                    new_description=new_description
+                )
+                table.refresh_transactions()
+
+                changed_fields = []
+                if new_amount is not None:
+                    changed_fields.append(f"amount: {new_amount:.2f}")
+                if new_description is not None:
+                    changed_fields.append(f"description: {new_description}")
+
+                self.notify(f"Updated: {', '.join(changed_fields)}", severity="information")
+
+        self.app.push_screen(EditTransactionModal(expense), callback=handle_edit)
+
+    def action_delete(self) -> None:
         """Delete selected transaction"""
         table = self.query_one("#transaction-list", TransactionList)
         expense = table.get_selected_transaction()
@@ -211,15 +303,17 @@ class TransactionsScreen(Screen):
             self.notify("No transaction selected", severity="warning")
             return
 
-        # Show confirmation modal
-        confirmed = await self.app.push_screen_wait(
-            ConfirmModal(f"Delete transaction: {expense.description}?\nThis will revert balance changes.")
-        )
+        # Show confirmation modal with callback
+        def handle_confirm(confirmed: bool) -> None:
+            if confirmed:
+                self.db.delete_expense(expense)
+                table.refresh_transactions()
+                self.notify("Transaction deleted", severity="information")
 
-        if confirmed:
-            self.db.delete_expense(expense)
-            table.refresh_transactions()
-            self.notify("Transaction deleted", severity="information")
+        self.app.push_screen(
+            ConfirmModal(f"Delete transaction: {expense.description}?\nThis will revert balance changes."),
+            callback=handle_confirm
+        )
 
     def action_filter_uncategorized(self) -> None:
         """Show only uncategorized transactions"""
@@ -233,14 +327,15 @@ class TransactionsScreen(Screen):
         table.set_filter_all()
         self.notify("Showing all transactions", severity="information")
 
-    async def action_search(self) -> None:
+    def action_search(self) -> None:
         """Search transactions"""
-        search_term = await self.app.push_screen_wait(SearchModal())
+        def handle_search(search_term: str | None) -> None:
+            if search_term:
+                table = self.query_one("#transaction-list", TransactionList)
+                table.search(search_term)
+                self.notify(f"Search: {search_term}", severity="information")
 
-        if search_term:
-            table = self.query_one("#transaction-list", TransactionList)
-            table.search(search_term)
-            self.notify(f"Search: {search_term}", severity="information")
+        self.app.push_screen(SearchModal(), callback=handle_search)
 
     def action_refresh(self) -> None:
         """Refresh transaction list"""

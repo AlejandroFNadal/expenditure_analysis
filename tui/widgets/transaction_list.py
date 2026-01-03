@@ -15,6 +15,7 @@ class TransactionList(DataTable):
         self.cursor_type = "row"
         self.zebra_stripes = True
         self.transactions: List[Expense] = []
+        self.transactions_with_balance: List[tuple] = []
         self.filter_mode = "all"  # all, uncategorized, search
         self.search_term = ""
 
@@ -22,9 +23,10 @@ class TransactionList(DataTable):
         """Called when widget is mounted"""
         # Add columns
         self.add_column("Date", width=12)
-        self.add_column("Description", width=40)
+        self.add_column("Description", width=35)
         self.add_column("Amount", width=12)
-        self.add_column("Category", width=20)
+        self.add_column("Balance", width=12)
+        self.add_column("Category", width=15)
         self.refresh_transactions()
 
     def refresh_transactions(self) -> None:
@@ -40,17 +42,30 @@ class TransactionList(DataTable):
         else:  # all
             self.transactions = self.db.get_all_expenses(order_desc=True)
 
-        # Add rows
-        for expense in self.transactions:
-            self.add_transaction_row(expense)
+        # Calculate balances for all transactions
+        self.transactions_with_balance = self.db.get_expenses_with_balance(
+            self.transactions, order_desc=True
+        )
 
-    def add_transaction_row(self, expense: Expense) -> None:
+        # Add rows
+        for expense, balance_after in self.transactions_with_balance:
+            self.add_transaction_row(expense, balance_after)
+
+    def clean_description(self, description: str) -> str:
+        """Clean up transaction description for display"""
+        # Replace verbose patterns with shorter versions
+        cleaned = description.replace("Purchase ZKB Visa Debit card", "ZKB")
+        cleaned = cleaned.replace("Online purchase ZKB", "ZKB")
+        return cleaned
+
+    def add_transaction_row(self, expense: Expense, balance_after: float) -> None:
         """Add a single transaction row to the table"""
         # Format date
         date_str = expense.date.strftime('%d.%m.%Y')
 
-        # Format description (truncate if needed)
-        description = expense.description[:38] + "..." if len(expense.description) > 40 else expense.description
+        # Clean and format description (truncate if needed)
+        cleaned_desc = self.clean_description(expense.description)
+        description = cleaned_desc[:33] + "..." if len(cleaned_desc) > 35 else cleaned_desc
 
         # Format amount with color
         amount = expense.amount
@@ -59,19 +74,25 @@ class TransactionList(DataTable):
         else:
             amount_str = f"[red]-{amount:.2f}[/red]"
 
+        # Format balance after with color
+        if balance_after >= 0:
+            balance_str = f"[cyan]{balance_after:,.2f}[/cyan]"
+        else:
+            balance_str = f"[red]{balance_after:,.2f}[/red]"
+
         # Format category
         if expense.is_transfer:
             if expense.target_account:
-                category_str = f"[cyan]→ {expense.target_account.name}[/cyan]"
+                category_str = f"[cyan]→ {expense.target_account.name[:12]}[/cyan]"
             else:
                 category_str = "[cyan]Transfer[/cyan]"
         elif expense.category:
-            category_str = expense.category.name
+            category_str = expense.category.name[:13]
         else:
-            category_str = "[yellow]Uncategorized[/yellow]"
+            category_str = "[yellow]Uncateg.[/yellow]"
 
         # Add row
-        self.add_row(date_str, description, amount_str, category_str)
+        self.add_row(date_str, description, amount_str, balance_str, category_str)
 
     def get_selected_transaction(self) -> Optional[Expense]:
         """Get the currently selected transaction"""

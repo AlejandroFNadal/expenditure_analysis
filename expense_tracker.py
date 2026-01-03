@@ -122,7 +122,8 @@ def list_accounts(db: Database):
         main_indicator = " [MAIN]" if account.is_main else ""
         desc = f" - {account.description}" if account.description else ""
         print(f"  {account.name}{main_indicator}")
-        print(f"    Balance: {account.balance:>10.2f} CHF{desc}")
+        current_balance = db.get_account_balance(account)
+        print(f"    Balance: {current_balance:>10.2f} CHF{desc}")
 
         # Get and display last transaction
         last_txn = db.get_last_transaction_for_account(account)
@@ -385,7 +386,8 @@ def set_balance(db: Database):
     print("\n💰 Set account balance")
     print("\n📋 Available accounts:")
     for i, account in enumerate(accounts, 1):
-        print(f"  {i}. {account.name} (Current: {account.balance:.2f} CHF)")
+        current_balance = db.get_account_balance(account)
+        print(f"  {i}. {account.name} (Current: {current_balance:.2f} CHF)")
     print("  0. Cancel")
 
     try:
@@ -400,7 +402,7 @@ def set_balance(db: Database):
             return
 
         account = accounts[choice_num - 1]
-        current_balance = account.balance
+        current_balance = db.get_account_balance(account)
 
         balance_input = input(f"\nNew balance for '{account.name}' (current: {current_balance:.2f} CHF): ").strip()
         new_balance = float(balance_input)

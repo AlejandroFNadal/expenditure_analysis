@@ -24,7 +24,7 @@ class Account(Base):
     transfers_to = relationship("Expense", foreign_keys="Expense.target_account_id", back_populates="target_account")
 
     def __repr__(self):
-        return f"<Account(name='{self.name}', is_main={self.is_main}, balance={self.balance})>"
+        return f"<Account(name='{self.name}', is_main={self.is_main})>"
 
 
 class ExpenseCategory(Base):
@@ -110,6 +110,13 @@ class TransferIndicator(Base):
 
 class Database:
     def __init__(self, db_path: str = "expenses.db"):
+        # Validate db_path is a string
+        if not isinstance(db_path, str):
+            raise TypeError(
+                f"db_path must be a string, not {type(db_path).__name__}. "
+                f"Got: {db_path!r}"
+            )
+
         self.engine = create_engine(f'sqlite:///{db_path}')
         Base.metadata.create_all(self.engine)
         Session = sessionmaker(bind=self.engine)
@@ -187,9 +194,33 @@ class Database:
         self.session.commit()
 
     def update_account_balance(self, account: Account, balance: float):
-        """Manually update an account's balance"""
-        account.balance = balance
-        self.session.commit()
+        """
+        Set an account's balance by creating a balance adjustment transaction
+        """
+        current_balance = self.get_account_balance(account)
+        difference = balance - current_balance
+
+        if difference == 0:
+            return  # No change needed
+
+        # Create a balance adjustment transaction
+        is_credit = difference > 0
+        amount = abs(difference)
+
+        # Get or create "Inserted" category for balance adjustments
+        inserted_category = self.get_category_by_name("Inserted")
+        if not inserted_category:
+            inserted_category = self.add_category("Inserted", "Manual balance adjustments")
+
+        # Add adjustment transaction
+        self.add_expense(
+            date=date_type.today(),
+            description=f"Balance adjustment for {account.name}",
+            amount=amount,
+            is_credit=is_credit,
+            category=inserted_category,
+            account=account
+        )
 
     def delete_account(self, account: Account) -> bool:
         """
@@ -230,19 +261,27 @@ class Database:
             target_account=target_account
         )
         self.session.add(expense)
+        self.session.commit()
+        return expense
 
-        # Update account balances
-        if account:
-            if is_transfer and target_account:
-                # Transfer: deduct from source, add to target
-                account.balance -= amount
-                target_account.balance += amount
-            elif is_credit:
-                # Credit (income): increase balance
-                account.balance += amount
-            else:
-                # Debit (expense): decrease balance
-                account.balance -= amount
+    def update_expense(self, expense: Expense, new_amount: Optional[float] = None,
+                      new_description: Optional[str] = None, new_category: Optional[ExpenseCategory] = None) -> Expense:
+        """Update an existing expense
+
+        Args:
+            expense: The expense to update
+            new_amount: New amount (if provided)
+            new_description: New description (if provided)
+            new_category: New category (if provided)
+        """
+        if new_amount is not None:
+            expense.amount = new_amount
+
+        if new_description is not None:
+            expense.description = new_description
+
+        if new_category is not None:
+            expense.category = new_category
 
         self.session.commit()
         return expense
@@ -359,29 +398,107 @@ class Database:
             Expense.date.desc()
         ).limit(limit).all()
 
+    def get_expenses_with_balance(self, expenses: List[Expense], order_desc: bool = True) -> List[tuple]:
+        """
+        Calculate running balance after each transaction.
+        Starts from zero and applies each transaction chronologically.
+
+        Args:
+            expenses: List of Expense objects to calculate balances for
+            order_desc: If True, return in descending date order (newest first)
+
+        Returns:
+            List of (Expense, float) tuples with balance after each transaction
+        """
+        if not expenses:
+            return []
+
+        # Sort expenses chronologically (oldest first) for calculation
+        sorted_expenses = sorted(expenses, key=lambda e: (e.date, e.id))
+
+        # Start all account balances at zero
+        account_balances = {}
+
+        # Calculate balance after each transaction
+        result = []
+        for expense in sorted_expenses:
+            if expense.account_id:
+                # Initialize account balance if not seen before
+                if expense.account_id not in account_balances:
+                    account_balances[expense.account_id] = 0.0
+                if expense.target_account_id and expense.target_account_id not in account_balances:
+                    account_balances[expense.target_account_id] = 0.0
+
+                # Apply this transaction
+                if expense.is_transfer and expense.target_account_id:
+                    account_balances[expense.account_id] -= expense.amount
+                    account_balances[expense.target_account_id] += expense.amount
+                    balance_after = account_balances[expense.account_id]
+                elif expense.is_credit:
+                    # Credit: add to balance
+                    account_balances[expense.account_id] += expense.amount
+                    balance_after = account_balances[expense.account_id]
+                else:
+                    # Debit: subtract from balance
+                    account_balances[expense.account_id] -= expense.amount
+                    balance_after = account_balances[expense.account_id]
+
+                result.append((expense, balance_after))
+            else:
+                # No account associated - show 0
+                result.append((expense, 0.0))
+
+        # Return in requested order
+        if order_desc:
+            return list(reversed(result))
+        return result
+
+    def get_account_balance(self, account: Account) -> float:
+        """
+        Calculate current balance for a specific account from all transactions
+
+        Args:
+            account: The account to calculate balance for
+
+        Returns:
+            float: Current balance based on all transactions
+
+        TODO: Optimize this with SQL aggregation query for better performance with large datasets
+        """
+        # Get all transactions involving this account
+        expenses = self.session.query(Expense).filter(
+            (Expense.account_id == account.id) | (Expense.target_account_id == account.id)
+        ).order_by(Expense.date.asc(), Expense.id.asc()).all()
+
+        if not expenses:
+            return 0.0
+
+        balance = 0.0
+        for expense in expenses:
+            if expense.account_id == account.id:
+                # This account is the source
+                if expense.target_account_id:
+                    # Transfer: always subtract from source
+                    balance -= expense.amount
+                else:
+                    # Regular transaction: check is_credit
+                    if expense.is_credit:
+                        balance += expense.amount
+                    else:
+                        balance -= expense.amount
+            elif expense.target_account_id == account.id:
+                # This account is the target: always add
+                balance += expense.amount
+
+        return balance
+
     def update_expense_category(self, expense: Expense, category: ExpenseCategory):
         """Update the category of an expense"""
         expense.category = category
         self.session.commit()
 
     def delete_expense(self, expense: Expense):
-        """
-        Delete an expense and revert account balance changes
-        """
-        # Revert balance changes
-        if expense.account:
-            if expense.is_transfer and expense.target_account:
-                # Revert transfer: add back to source, subtract from target
-                expense.account.balance += expense.amount
-                expense.target_account.balance -= expense.amount
-            elif expense.is_credit:
-                # Revert credit: decrease balance
-                expense.account.balance -= expense.amount
-            else:
-                # Revert debit: increase balance
-                expense.account.balance += expense.amount
-
-        # Delete the expense
+        """Delete an expense"""
         self.session.delete(expense)
         self.session.commit()
 
@@ -415,18 +532,9 @@ class Database:
         ).count()
         return count > 0
 
-    def clear_all_transactions(self, reset_balances: bool = True):
-        """
-        Delete all transactions from the database
-        Optionally reset account balances to 0
-        """
+    def clear_all_transactions(self):
+        """Delete all transactions from the database"""
         self.session.query(Expense).delete()
-
-        if reset_balances:
-            accounts = self.get_accounts()
-            for account in accounts:
-                account.balance = 0.0
-
         self.session.commit()
 
     def close(self):

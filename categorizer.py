@@ -171,7 +171,8 @@ class InteractiveCategorizer:
             print("\n📋 Transfer to which account?")
 
         for i, acc in enumerate(other_accounts, 1):
-            balance_info = f" (Balance: {acc.balance:.2f} CHF)" if acc.balance != 0 else ""
+            acc_balance = self.db.get_account_balance(acc)
+            balance_info = f" (Balance: {acc_balance:.2f} CHF)" if acc_balance != 0 else ""
             print(f"  {i}. {acc.name}{balance_info}")
         print(f"  0. Cancel (not a transfer)")
 
@@ -254,9 +255,6 @@ class InteractiveCategorizer:
                             actual_source = main_account
                             actual_target = auto_other
                         expense.target_account = actual_target
-                        # Update account balances
-                        actual_source.balance -= expense.amount
-                        actual_target.balance += expense.amount
                         self.db.session.commit()
                         categorized_count += 1
                         print(f"\n✅ Auto-detected transfer: {expense.description} | {expense.amount:.2f} CHF ({actual_source.name} → {actual_target.name})")
@@ -299,9 +297,6 @@ class InteractiveCategorizer:
                         # Mark as transfer
                         expense.is_transfer = True
                         expense.target_account = actual_target
-                        # Update balances
-                        actual_source.balance -= expense.amount
-                        actual_target.balance += expense.amount
                         self.db.session.commit()
                         categorized_count += 1
 

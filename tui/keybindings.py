@@ -12,6 +12,7 @@ GLOBAL_KEYS = {
 # Dashboard screen keybindings
 DASHBOARD_KEYS = {
     't': 'show_transactions',
+    'm': 'toggle_balances',
     'r': 'refresh',
     'i': 'import_csv',
     'a': 'add_account',
@@ -24,6 +25,7 @@ TRANSACTIONS_KEYS = {
     'down': 'nav_down',
     'up': 'nav_up',
     'c': 'categorize',
+    'e': 'edit',
     't': 'mark_transfer',
     'd': 'delete',
     'slash': 'search',
@@ -43,6 +45,7 @@ Navigation:
   r - Refresh data
 
 Actions:
+  m - Toggle balance visibility (hide/show)
   i - Import CSV (future)
   a - Add account (future)
 
@@ -62,6 +65,7 @@ Navigation:
 
 Actions:
   c - Categorize transaction
+  e - Edit transaction
   t - Mark as transfer
   d - Delete transaction
 

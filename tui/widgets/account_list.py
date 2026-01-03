@@ -12,9 +12,15 @@ class AccountList(Static):
     def __init__(self, db: Database, **kwargs):
         super().__init__(**kwargs)
         self.db = db
+        self.balances_hidden = True  # Start with balances hidden for privacy
 
     def on_mount(self) -> None:
         """Called when widget is mounted"""
+        self.refresh_accounts()
+
+    def toggle_balance_visibility(self) -> None:
+        """Toggle between showing and hiding balances"""
+        self.balances_hidden = not self.balances_hidden
         self.refresh_accounts()
 
     def refresh_accounts(self) -> None:
@@ -35,21 +41,33 @@ class AccountList(Static):
                 name = f"  {account.name}"
 
             # Color balance based on positive/negative
-            balance = account.balance
+            balance = self.db.get_account_balance(account)
             total += balance
-            if balance >= 0:
-                balance_str = f"[green]{balance:,.2f} CHF[/green]"
+
+            if self.balances_hidden:
+                # Show masked balance with same color coding
+                color = "green" if balance >= 0 else "red"
+                balance_str = f"[{color}]##### CHF[/{color}]"
             else:
-                balance_str = f"[red]{balance:,.2f} CHF[/red]"
+                if balance >= 0:
+                    balance_str = f"[green]{balance:,.2f} CHF[/green]"
+                else:
+                    balance_str = f"[red]{balance:,.2f} CHF[/red]"
 
             table.add_row(name, balance_str)
 
         # Add total row
         table.add_row("", "")
         total_style = "green" if total >= 0 else "red"
+
+        if self.balances_hidden:
+            total_str = f"[bold {total_style}]##### CHF[/bold {total_style}]"
+        else:
+            total_str = f"[bold {total_style}]{total:,.2f} CHF[/bold {total_style}]"
+
         table.add_row(
             f"[bold]Total[/bold]",
-            f"[bold {total_style}]{total:,.2f} CHF[/bold {total_style}]"
+            total_str
         )
 
         # Update the content

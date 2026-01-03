@@ -124,6 +124,7 @@ class DashboardScreen(Screen):
 
     BINDINGS = [
         ("t", "show_transactions", "Transactions"),
+        ("m", "toggle_balances", "Toggle Balances"),
         ("r", "refresh", "Refresh"),
         ("q", "quit", "Quit"),
         ("question_mark", "help", "Help"),
@@ -175,6 +176,11 @@ class DashboardScreen(Screen):
         recent.refresh_transactions()
 
         self.notify("Data refreshed")
+
+    def action_toggle_balances(self) -> None:
+        """Toggle visibility of account balances"""
+        accounts = self.query_one("#accounts", AccountList)
+        accounts.toggle_balance_visibility()
 
     def action_help(self) -> None:
         """Show help"""
